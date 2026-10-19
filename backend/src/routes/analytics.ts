@@ -1,17 +1,10 @@
 import { Router, Response } from 'express';
 import { analyticsService } from '../services/analytics-service';
-import { authenticate, AuthenticatedRequest } from '../middleware/auth';
+import { AuthenticatedRequest } from '../middleware/auth';
 import logger from '../config/logger';
 
 const router: Router = Router();
 
-// All analytics routes require authentication
-router.use(authenticate);
-
-/**
- * GET /api/analytics/summary
- * Get spend analytics summary and trends
- */
 router.get('/summary', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const summary = await analyticsService.getSummary(req.user!.id);
@@ -28,13 +21,9 @@ router.get('/summary', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-/**
- * GET /api/analytics/budgets
- * Get user budgets
- */
 router.get('/budgets', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { data: budgets, error } = await (analyticsService as any).getUserBudgets(req.user!.id);
+    const { data: budgets, error } = await analyticsService.getUserBudgets(req.user!.id);
     if (error) throw error;
     res.json({ success: true, data: budgets });
   } catch (error) {
@@ -42,10 +31,6 @@ router.get('/budgets', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-/**
- * GET /api/analytics/spending
- * Get spending trends
- */
 router.get('/spending', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const spending = await analyticsService.getSpending(req.user!.id);
@@ -62,10 +47,6 @@ router.get('/spending', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-/**
- * GET /api/analytics/forecast
- * Get spending forecast for next 6 months
- */
 router.get('/forecast', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const forecast = await analyticsService.getForecast(req.user!.id);

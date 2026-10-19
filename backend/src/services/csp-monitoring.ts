@@ -9,6 +9,7 @@
 import * as Sentry from '@sentry/node';
 import { supabase, trackDbRequest } from '../config/database';
 import logger from '../config/logger';
+import { env } from '../config/env';
 
 /**
  * CSP Violation Report structure from browser
@@ -53,14 +54,29 @@ export interface CspViolationStats {
 }
 
 /**
+ * Browser extension URI prefixes that are known false positives
+ */
+const EXTENSION_PATTERNS = [
+    'chrome-extension://',
+    'moz-extension://',
+    'safari-extension://',
+    'ms-browser-extension://',
+];
+
+function isExtensionFalsePositive(blockedUri?: string): boolean {
+    if (!blockedUri) return false;
+    return EXTENSION_PATTERNS.some((p) => blockedUri.startsWith(p));
+}
+
+/**
  * Alert thresholds for CSP violations
  */
 const ALERT_THRESHOLDS = {
     // Alert if a single violation type occurs more than this many times per hour
-    HOURLY_RATE: parseInt(process.env.CSP_ALERT_HOURLY_RATE || '100', 10),
+    HOURLY_RATE: parseInt(env.CSP_ALERT_HOURLY_RATE, 10),
 
     // Alert if a violation affects more than this many unique users
-    AFFECTED_USERS: parseInt(process.env.CSP_ALERT_AFFECTED_USERS || '50', 10),
+    AFFECTED_USERS: parseInt(env.CSP_ALERT_AFFECTED_USERS, 10),
 
     // Alert if a new violation type appears (first seen in last 5 minutes)
     NEW_VIOLATION_WINDOW_MS: 5 * 60 * 1000,
@@ -73,6 +89,11 @@ export async function persistCspViolation(
     report: CspViolationReport,
     context: CspViolationContext
 ): Promise<{ success: boolean; error?: string }> {
+    // Skip false positives from browser extensions before hitting the database
+    if (isExtensionFalsePositive(report['blocked-uri'])) {
+        return { success: true };
+    }
+
     const release = trackDbRequest();
 
     try {

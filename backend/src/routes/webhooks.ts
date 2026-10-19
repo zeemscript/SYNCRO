@@ -1,15 +1,15 @@
 import { Router, Response } from 'express';
 import { webhookService } from '../services/webhook-service';
-import { authenticate, AuthenticatedRequest } from '../middleware/auth';
+import { AuthenticatedRequest } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { validate } from '../middleware/validate';
+import { idempotent } from '../middleware/idempotency';
 import logger from '../config/logger';
 import { createWebhookSchema, updateWebhookSchema } from '../schemas/webhook';
+import { uuidParamSchema } from '../schemas/common';
 
 const router: Router = Router();
 
-// All routes require authentication
-router.use(authenticate);
 
 /**
  * POST /api/webhooks
@@ -30,6 +30,7 @@ router.post('/', requireRole('owner', 'admin'), validate(createWebhookSchema), a
 /**
  * GET /api/webhooks
  */
+// VALIDATION_BYPASS: No request parameters needed
 router.get('/', requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const webhooks = await webhookService.listWebhooks(req.user!.id);
@@ -46,7 +47,7 @@ router.get('/', requireRole('owner', 'admin'), async (req: AuthenticatedRequest,
 /**
  * PUT /api/webhooks/:id
  */
-router.put('/:id', requireRole('owner', 'admin'), validate(updateWebhookSchema), async (req: AuthenticatedRequest, res: Response) => {
+router.put('/:id', requireRole('owner', 'admin'), validate(uuidParamSchema, 'params'), validate(updateWebhookSchema), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const webhook = await webhookService.updateWebhook(
       req.user!.id,
@@ -66,7 +67,7 @@ router.put('/:id', requireRole('owner', 'admin'), validate(updateWebhookSchema),
 /**
  * DELETE /api/webhooks/:id
  */
-router.delete('/:id', requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:id', requireRole('owner', 'admin'), validate(uuidParamSchema, 'params'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     await webhookService.deleteWebhook(
       req.user!.id,
@@ -85,7 +86,7 @@ router.delete('/:id', requireRole('owner', 'admin'), async (req: AuthenticatedRe
 /**
  * POST /api/webhooks/:id/test
  */
-router.post('/:id/test', requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
+router.post('/:id/test', requireRole('owner', 'admin'), validate(uuidParamSchema, 'params'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const delivery = await webhookService.triggerTestEvent(
       req.user!.id,
@@ -104,7 +105,7 @@ router.post('/:id/test', requireRole('owner', 'admin'), async (req: Authenticate
 /**
  * GET /api/webhooks/:id/deliveries
  */
-router.get('/:id/deliveries', requireRole('owner', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
+router.get('/:id/deliveries', requireRole('owner', 'admin'), validate(uuidParamSchema, 'params'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const deliveries = await webhookService.getDeliveries(
       req.user!.id,
@@ -178,7 +179,7 @@ router.get('/dead-letter/stats', async (req: AuthenticatedRequest, res: Response
  * POST /api/webhooks/:deliveryId/dead-letter/replay
  * Create a replay request for a dead-letter delivery
  */
-router.post('/:deliveryId/dead-letter/replay', async (req: AuthenticatedRequest, res: Response) => {
+router.post('/:deliveryId/dead-letter/replay', idempotent(), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { idempotency_key } = req.body;
     const deliveryId = Array.isArray(req.params.deliveryId) ? req.params.deliveryId[0] : req.params.deliveryId;
@@ -220,7 +221,7 @@ router.get('/:deliveryId/dead-letter/replay-history', async (req: AuthenticatedR
  * POST /api/webhooks/dead-letter/replay/:replayId/execute
  * Execute a replay for a dead-letter delivery
  */
-router.post('/dead-letter/replay/:replayId/execute', async (req: AuthenticatedRequest, res: Response) => {
+router.post('/dead-letter/replay/:replayId/execute', idempotent(), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const replayId = Array.isArray(req.params.replayId) ? req.params.replayId[0] : req.params.replayId;
     const result = await webhookService.executeDeadLetterReplay(req.user!.id, replayId);

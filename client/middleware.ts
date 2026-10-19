@@ -17,6 +17,11 @@ const securityHeaders = {
 /**
  * Generate Content Security Policy with nonce for script/style inline execution
  * Uses report-only mode for safe rollout - switch to enforcing after 1 week clean
+ * 
+ * Tor Browser Compatibility:
+ * - Supports http:// for .onion addresses, so upgrade-insecure-requests is optional
+ * - Allows all standard Web APIs and storage mechanisms
+ * - Removes upgrade-insecure-requests in development to support .onion testing
  */
 function generateCSP(
   nonce: string,
@@ -27,15 +32,16 @@ function generateCSP(
   const cspHeader = [
     `default-src 'self'`,
     `script-src 'self' 'nonce-${nonce}' ${isDev ? "'unsafe-eval'" : "'strict-dynamic'"}`,
-    `style-src 'self' 'unsafe-inline'`, // 'unsafe-inline' is needed for Tailwind/CSS-in-JS, nonce would disable it
+    `style-src 'self' 'nonce-${nonce}'${isDev ? " 'unsafe-inline'" : ''}`,
     `img-src 'self' blob: data: https://res.cloudinary.com https://*.supabase.co https://ui-avatars.com`,
     `font-src 'self' data:`,
-    `connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.stripe.com https://*.stellar.org`,
+    `connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.stripe.com https://*.stellar.org${isDev ? " http://localhost:* http://127.0.0.1:*" : ""}`,
     `frame-src 'self' https://js.stripe.com`,
     `object-src 'none'`,
     `base-uri 'self'`,
     `form-action 'self'`,
-    `upgrade-insecure-requests`,
+    // Note: upgrade-insecure-requests is omitted to support Tor Browser .onion addresses
+    // which use http:// by design
   ].join("; ");
 
   // Enforcing mode by default for strict security

@@ -1,7 +1,9 @@
 import logger from '../config/logger';
-import { NotificationPayload, DeliveryResult } from '../types/reminder';
-import { sanitizeUrl } from '../utils/sanitize-url';
-import { NonRetryableError, RetryableError, withRetry } from '../utils/retry';
+import { env } from '../config/env';
+import { DeliveryResult } from '../types/reminder';
+import { V3NotificationEventType, V3EventPayload } from '../types/v3-notifications';
+import { renderV3Slack } from './v3-notification-templates';
+import { ExternalServiceClient } from '../utils/external-service-client';
 
 export interface SlackServiceStatus {
   configured: boolean;
@@ -11,9 +13,10 @@ export interface SlackServiceStatus {
 
 export class SlackService {
   private readonly webhookUrl: string;
+  private readonly client = new ExternalServiceClient('slack');
 
   constructor(webhookUrl?: string) {
-    this.webhookUrl = webhookUrl || process.env.SLACK_WEBHOOK_URL || '';
+    this.webhookUrl = webhookUrl || env.SLACK_WEBHOOK_URL || '';
   }
 
   isConfigured(): boolean {
@@ -38,13 +41,31 @@ export class SlackService {
     };
   }
 
-  async sendReminderNotification(
-    payload: NotificationPayload,
+  /**
+   * Deprecated stub — subscription reminders removed in v3.
+   */
+  async sendReminderNotification(): Promise<DeliveryResult> {
+    logger.warn('[SlackService] sendReminderNotification deprecated — subscription reminders removed in v3. Use sendV3Notification.');
+    return {
+      success: false,
+      error: 'Subscription reminder templates have been removed in v3. Use V3 notification dispatch.',
+      metadata: { retryable: false, deprecated: true },
+    };
+  }
+
+  /**
+   * Send a V3 notification via Slack using renderV3Slack template blocks.
+   */
+  async sendV3Notification(
+    eventType: V3NotificationEventType,
+    payload: V3EventPayload,
+    webhookUrl?: string,
     options: { maxAttempts?: number } = {},
   ): Promise<DeliveryResult> {
+    const targetUrl = webhookUrl || this.webhookUrl;
     const { maxAttempts = 3 } = options;
 
-    if (!this.webhookUrl) {
+    if (!targetUrl) {
       return {
         success: false,
         error: 'Slack webhook URL is not configured',
@@ -53,50 +74,26 @@ export class SlackService {
     }
 
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetch(this.webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(this.buildMessage(payload)),
-          });
+      const slackMsg = renderV3Slack(eventType, payload);
+      await this.client.request(targetUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(slackMsg),
+        maxAttempts,
+      });
 
-          if (!response.ok) {
-            const responseText = await response.text();
-            const errorMessage = `Slack webhook responded with ${response.status}`;
-            const retryable = response.status === 429 || response.status >= 500;
-
-            if (retryable) {
-              throw new RetryableError(`${errorMessage}: ${responseText.slice(0, 200)}`);
-            }
-
-            throw new NonRetryableError(`${errorMessage}: ${responseText.slice(0, 200)}`);
-          }
-
-          logger.info('Slack notification sent successfully', {
-            subscriptionId: payload.subscription.id,
-            reminderType: payload.reminderType,
-          });
-
-          return {
-            success: true,
-            metadata: {
-              status: response.status,
-              channel: 'slack',
-            },
-          };
-        },
-        { maxAttempts },
-      );
+      logger.info('[SlackService] V3 notification sent successfully', { eventType });
+      return {
+        success: true,
+        metadata: { channel: 'slack', eventType },
+      };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-
-      logger.error('Failed to send Slack notification:', errorMessage);
-
+      logger.error('[SlackService] Failed to send V3 notification:', { eventType, errorMessage });
       return {
         success: false,
         error: errorMessage,
-        metadata: { retryable: this.isRetryableError(error) },
+        metadata: { retryable: true },
       };
     }
   }
@@ -105,8 +102,6 @@ export class SlackService {
     text: string,
     options: { maxAttempts?: number } = {},
   ): Promise<DeliveryResult> {
-    const { maxAttempts = 3 } = options;
-
     if (!this.webhookUrl) {
       return {
         success: false,
@@ -116,132 +111,28 @@ export class SlackService {
     }
 
     try {
-      return await withRetry(
-        async () => {
-          const response = await fetch(this.webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-          });
+      await this.client.request(this.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
 
-          if (!response.ok) {
-            const responseText = await response.text();
-            const retryable = response.status === 429 || response.status >= 500;
-            const errorMessage = `Slack webhook responded with ${response.status}: ${responseText.slice(0, 200)}`;
-
-            if (retryable) {
-              throw new RetryableError(errorMessage);
-            }
-
-            throw new NonRetryableError(errorMessage);
-          }
-
-          return {
-            success: true,
-            metadata: { status: response.status, channel: 'slack' },
-          };
-        },
-        { maxAttempts },
-      );
+      return {
+        success: true,
+        metadata: { channel: 'slack' },
+      };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
       return {
         success: false,
         error: errorMessage,
-        metadata: { retryable: this.isRetryableError(error) },
+        metadata: { retryable: true },
       };
     }
   }
 
-  private buildMessage(payload: NotificationPayload): { text: string; blocks: Array<Record<string, unknown>> } {
-    const subscriptionUrl = payload.subscription.renewal_url
-      ? sanitizeUrl(payload.subscription.renewal_url)
-      : null;
 
-    const summary = this.buildSummary(payload);
-    const blocks: Array<Record<string, unknown>> = [
-      {
-        type: 'header',
-        text: {
-          type: 'plain_text',
-          text: summary.title,
-        },
-      },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: summary.body,
-        },
-      },
-      {
-        type: 'section',
-        fields: [
-          { type: 'mrkdwn', text: `*Subscription:*\n${payload.subscription.name}` },
-          { type: 'mrkdwn', text: `*Due in:*\n${payload.daysBefore} day${payload.daysBefore === 1 ? '' : 's'}` },
-          { type: 'mrkdwn', text: `*Renewal date:*\n${new Date(payload.renewalDate).toLocaleDateString('en-US')}` },
-          { type: 'mrkdwn', text: `*Channel:*\nSlack` },
-        ],
-      },
-    ];
-
-    if (subscriptionUrl && subscriptionUrl !== '#') {
-      blocks.push({
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Open subscription' },
-            url: subscriptionUrl,
-          },
-        ],
-      });
-    }
-
-    return {
-      text: `${summary.title} ${summary.body}`,
-      blocks,
-    };
-  }
-
-  private buildSummary(payload: NotificationPayload): { title: string; body: string } {
-    if (payload.reminderType === 'trial_expiry') {
-      return {
-        title: `Trial ending soon: ${payload.subscription.name}`,
-        body: `${payload.subscription.name} trial ends in ${payload.daysBefore} day${payload.daysBefore === 1 ? '' : 's'}.`,
-      };
-    }
-
-    return {
-      title: `Renewal reminder: ${payload.subscription.name}`,
-      body: `${payload.subscription.name} renews in ${payload.daysBefore} day${payload.daysBefore === 1 ? '' : 's'}.`,
-    };
-  }
-
-  private isRetryableError(error: unknown): boolean {
-    if (error instanceof NonRetryableError) {
-      return false;
-    }
-
-    if (error instanceof RetryableError) {
-      return true;
-    }
-
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return [
-      /timeout/i,
-      /network/i,
-      /connection/i,
-      /econnrefused/i,
-      /etimedout/i,
-      /temporary/i,
-      /rate limit/i,
-      /503/i,
-      /502/i,
-      /504/i,
-    ].some((pattern) => pattern.test(errorMessage));
-  }
 }
 
 export const slackService = new SlackService();

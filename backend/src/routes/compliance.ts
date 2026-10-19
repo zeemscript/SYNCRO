@@ -24,7 +24,10 @@ const exportRateLimit = RateLimiterFactory.createCustomLimiter({
   windowMs: 60 * 60 * 1000,
   max: 1,
   message: { error: 'Export rate limit exceeded. Try again in 1 hour.' },
-  keyGenerator: (req: any) => req.user?.id || req.ip,
+  keyGenerator: (req: Request) => {
+    const authReq = req as AuthenticatedRequest;
+    return authReq.user?.id || req.ip || 'anonymous';
+  },
   endpointType: 'data-export',
 });
 
@@ -70,8 +73,8 @@ async function resolveUserFromTokenOrSession(
   let sessionToken: string | null = null;
   if (authHeader?.startsWith('Bearer ')) {
     sessionToken = authHeader.substring(7);
-  } else if ((req as any).cookies?.authToken) {
-    sessionToken = (req as any).cookies.authToken;
+  } else if (req.cookies?.authToken) {
+    sessionToken = req.cookies.authToken;
   }
   if (!sessionToken) return null;
 
@@ -105,6 +108,7 @@ router.get('/export', authenticate, exportRateLimit, async (req: AuthenticatedRe
     archive.append(JSON.stringify(data.emailAccounts, null, 2), { name: 'email_accounts.json' });
     archive.append(JSON.stringify(data.teams, null, 2), { name: 'teams.json' });
     archive.append(JSON.stringify(data.blockchainLogs, null, 2), { name: 'blockchain_logs.json' });
+    archive.append(JSON.stringify(data.blindingFactors, null, 2), { name: 'blinding_factors.json' });
 
     const readme = [
       'Syncro — Personal Data Export',
@@ -121,6 +125,7 @@ router.get('/export', authenticate, exportRateLimit, async (req: AuthenticatedRe
       '  email_accounts.json — Connected email accounts',
       '  teams.json          — Team membership records',
       '  blockchain_logs.json — On-chain contract events and renewal approvals',
+      '  blinding_factors.json — Pedersen commitment blinding factors for audit data',
       '',
       'For questions or deletion requests, contact support.',
     ].join('\n');

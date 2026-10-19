@@ -13,6 +13,9 @@
 
 import { encrypt, decrypt } from '../utils/encryption';
 import { supabase } from '../config/database';
+import { env } from '../config/env';
+import { ExternalServiceClient } from '../utils/external-service-client';
+import { SingleFlight } from '../utils/single-flight';
 
 type TokenResponse = {
   access_token: string;
@@ -20,62 +23,77 @@ type TokenResponse = {
   expires_in: number;
 };
 
+const gmailClient = new ExternalServiceClient('gmail');
+const singleFlight = new SingleFlight<string>();
+
 export class GmailTokenService {
   /**
    * Uses the stored encrypted refresh token to obtain and persist a new access token.
+   * Single-flight: only one refresh per account at a time.
    */
   static async refreshAccessToken(userId: string): Promise<string> {
-    // 1. Retrieve the encrypted account record
-    const { data: account, error } = await supabase
+    // First, get the account id to use as the single-flight key
+    const { data: account, error: fetchError } = await supabase
       .from('email_accounts')
       .select('*')
       .eq('user_id', userId)
       .eq('provider', 'gmail')
       .single();
 
-    if (error || !account || !account.refresh_token) {
+    if (fetchError || !account || !account.refresh_token) {
       throw new Error('No valid Gmail credentials found for rotation');
     }
 
-    // 2. Decrypt refresh token for the rotation request
-    const decryptedRefreshToken = decrypt(account.refresh_token);
+    const key = `gmail-refresh:${account.id}`;
 
-    // 3. Request new tokens from Google OAuth2
-    const response = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: process.env.GOOGLE_CLIENT_ID || '',
-        client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
-        refresh_token: decryptedRefreshToken,
-        grant_type: 'refresh_token',
-      }),
+    return singleFlight.do(key, async () => {
+      // Re-fetch account inside the single-flight to get the latest (in case another process updated it)
+      const { data: latestAccount, error: latestFetchError } = await supabase
+        .from('email_accounts')
+        .select('*')
+        .eq('id', account.id)
+        .single();
+
+      if (latestFetchError || !latestAccount || !latestAccount.refresh_token) {
+        throw new Error('No valid Gmail credentials found for rotation');
+      }
+
+      // Decrypt refresh token for the rotation request
+      const decryptedRefreshToken = decrypt(latestAccount.refresh_token);
+
+      // Request new tokens from Google OAuth2
+      const data = await gmailClient.request<TokenResponse>('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: env.GOOGLE_CLIENT_ID || '',
+          client_secret: env.GOOGLE_CLIENT_SECRET || '',
+          refresh_token: decryptedRefreshToken,
+          grant_type: 'refresh_token',
+        }).toString(),
+      });
+
+      const { access_token, refresh_token: newRefreshToken, expires_in } = data;
+
+      // Re-encrypt rotated credentials before database update
+      const encryptedAccessToken = encrypt(access_token);
+      const updateData: any = {
+        access_token: encryptedAccessToken,
+        token_expiry: new Date(Date.now() + expires_in * 1000).toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      if (newRefreshToken) {
+        updateData.refresh_token = encrypt(newRefreshToken);
+      }
+
+      await supabase
+        .from('email_accounts')
+        .update(updateData)
+        .eq('id', latestAccount.id);
+
+      return access_token;
     });
-
-    if (!response.ok) {
-      throw new Error(`Failed to refresh Gmail token: ${response.status}`);
-    }
-
-    const { access_token, refresh_token: newRefreshToken, expires_in } = await response.json() as TokenResponse;
-
-    // 4. Re-encrypt rotated credentials before database update
-    const encryptedAccessToken = encrypt(access_token);
-    const updateData: any = {
-      access_token: encryptedAccessToken,
-      token_expires_at: new Date(Date.now() + expires_in * 1000).toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    if (newRefreshToken) {
-      updateData.refresh_token = encrypt(newRefreshToken);
-    }
-
-    await supabase
-      .from('email_accounts')
-      .update(updateData)
-      .eq('id', account.id);
-
-    return access_token;
   }
 
   /**
@@ -100,30 +118,23 @@ export class GmailTokenService {
           ? decrypt(account.access_token)
           : null;
 
-      if (!tokenToRevoke) {
-        throw new Error('No Gmail token available for revocation');
+      if (tokenToRevoke) {
+        await gmailClient.request(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokenToRevoke)}`, {
+          method: 'POST',
+        }).catch(err => {
+          // If revocation fails, we still proceed with local purging
+          // to ensure account is disconnected from our side
+          logger.warn('Google token revocation failed', { error: err?.message });
+        });
       }
-      
-      await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokenToRevoke)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      });
-    } catch (err) {
-      // We log but continue scrubbing locally even if revocation fails (e.g. token already expired)
-      console.warn('Remote revocation failed, proceeding with local scrubbing:', err);
+    } catch (revokeError) {
+      logger.warn('Gmail disconnect revocation attempt failed', { error: revokeError });
     }
 
-    // 2. Immediate scrubbing of encrypted credentials from the database
-    const { error } = await supabase
+    // 2. Purge local credentials
+    await supabase
       .from('email_accounts')
-      .update({
-        access_token: null,
-        refresh_token: null,
-        is_connected: false,
-        updated_at: new Date().toISOString(),
-      })
+      .delete()
       .eq('id', account.id);
-
-    if (error) throw error;
   }
 }

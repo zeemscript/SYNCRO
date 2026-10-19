@@ -1,8 +1,8 @@
 import cron from 'node-cron';
 import { reminderEngine } from '../services/reminder-engine';
+import { container } from '../services/container';
 import { notificationPreferenceService } from '../services/notification-preference-service';
-import { checkBudgetAlerts } from '../services/budget-alert-service';
-import { supabase } from '../config/database';
+import { checkBudgetAlertsForUsers } from '../services/budget-alert-service';
 import logger from '../config/logger';
 import { runWithCorrelationId } from '../middleware/requestContext';
 
@@ -28,8 +28,8 @@ cron.schedule('0 0 * * *', () =>
 cron.schedule('0 8 * * *', () =>
   runWithCorrelationId('cron:schedule-reminders', async (cid) => {
     logger.info('Cron: scheduling reminders', { correlationId: cid });
-    try {
-      await reminderEngine.scheduleReminders();
+      try {
+        await container.reminderEngine.scheduleReminders();
       logger.info('Cron: reminders scheduled successfully');
     } catch (error) {
       logger.error('Cron: failed to schedule reminders:', error);
@@ -41,8 +41,8 @@ cron.schedule('0 8 * * *', () =>
 cron.schedule('0 9 * * *', () =>
   runWithCorrelationId('cron:process-reminders', async (cid) => {
     logger.info('Cron: processing reminders', { correlationId: cid });
-    try {
-      await reminderEngine.processReminders();
+      try {
+        await container.reminderEngine.processReminders();
       logger.info('Cron: reminders processed successfully');
     } catch (error) {
       logger.error('Cron: failed to process reminders:', error);
@@ -54,8 +54,8 @@ cron.schedule('0 9 * * *', () =>
 cron.schedule('*/30 * * * *', () =>
   runWithCorrelationId('cron:retries', async (cid) => {
     logger.info('Cron: processing retries', { correlationId: cid });
-    try {
-      await reminderEngine.processRetries();
+      try {
+        await container.reminderEngine.processRetries();
       logger.info('Cron: retries processed successfully');
     } catch (error) {
       logger.error('Cron: failed to process retries:', error);
@@ -68,14 +68,9 @@ cron.schedule('0 10 * * *', () =>
   runWithCorrelationId('cron:budget-alerts', async (cid) => {
     logger.info('Cron: checking budget alerts', { correlationId: cid });
     try {
-      const { data: profiles } = await supabase
-        .from('profiles')
-        .select('id')
-        .not('monthly_budget', 'is', null);
-
-      await Promise.allSettled(
-        (profiles ?? []).map((p: { id: string }) => checkBudgetAlerts(p.id))
-      );
+      // Batched: fans out over every user with a budget in a fixed number of
+      // queries rather than one round of queries per user (issue #1095).
+      await checkBudgetAlertsForUsers();
       logger.info('Cron: budget alerts processed');
     } catch (error) {
       logger.error('Cron: failed to process budget alerts:', error);

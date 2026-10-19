@@ -7,7 +7,7 @@ export interface Subscription {
   provider: string;
   price: number;
   currency: string;
-  billing_cycle: "monthly" | "yearly" | "quarterly";
+  billing_cycle: "monthly" | "yearly" | "quarterly" | "weekly" | "annual";
   status: "active" | "cancelled" | "paused" | "trial" | "expired";
   next_billing_date: string | null;
   category: string | null;
@@ -31,6 +31,9 @@ export interface Subscription {
   last_interaction_at: string | null;
   last_renewal_attempt_at?: string | null;
   failure_count?: number;
+  stealth_index: number;
+  stealth_address: string | null;
+  is_encrypted: boolean;
 }
 
 export interface SubscriptionCreateInput {
@@ -39,7 +42,7 @@ export interface SubscriptionCreateInput {
   merchant_id?: string;
   price: number;
   currency?: string;
-  billing_cycle: "monthly" | "yearly" | "quarterly";
+  billing_cycle: "monthly" | "yearly" | "quarterly" | "weekly" | "annual";
   status?: "active" | "cancelled" | "paused" | "trial" | "expired";
   next_billing_date?: string;
   category?: string;
@@ -63,7 +66,7 @@ export interface SubscriptionUpdateInput {
   merchant_id?: string;
   price?: number;
   currency?: string;
-  billing_cycle?: "monthly" | "yearly" | "quarterly";
+  billing_cycle?: "monthly" | "yearly" | "quarterly" | "weekly" | "annual";
   status?: "active" | "cancelled" | "paused" | "trial" | "expired";
   next_billing_date?: string;
   category?: string;
@@ -105,6 +108,7 @@ export interface SubscriptionUpdateAllowlist {
 export interface ListSubscriptionsOptions {
   status?: Subscription["status"];
   category?: string;
+  encryptedOnly?: boolean;
   limit?: number;
   offset?: number;
   cursor?: string;

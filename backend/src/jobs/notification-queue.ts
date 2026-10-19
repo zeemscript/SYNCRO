@@ -1,10 +1,11 @@
 import { Queue, Worker, Job } from 'bullmq';
-import { createClient } from 'redis';
 import logger from '../config/logger';
+import { env } from '../config/env';
 import { pushService } from './push-service';
 import { notificationDeadLetterService } from '../services/notification-dead-letter-service';
+import { jobAlertService } from '../services/job-alert-service';
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const REDIS_URL = env.REDIS_URL || 'redis://localhost:6379';
 const connection = { url: REDIS_URL };
 
 // Retry delays: 5m, 30m, 2h (in ms)
@@ -67,6 +68,8 @@ notificationWorker.on('failed', (job, err) => {
     error: err.message,
   });
 
+  jobAlertService.recordJobOutcome('notification-queue', false, err);
+
   // Move to dead-letter if exhausted all retries
   if (job && job.attemptsMade >= (RETRY_DELAYS.length + 1)) {
     const jobData = job.data as NotificationJobData;
@@ -86,8 +89,16 @@ notificationWorker.on('failed', (job, err) => {
 
 notificationWorker.on('completed', (job) => {
   logger.info('Notification job completed', { jobId: job.id });
+  jobAlertService.recordJobOutcome('notification-queue', true);
 });
 
 export async function enqueueNotification(data: NotificationJobData): Promise<void> {
   await notificationQueue.add('send', data);
+}
+
+export async function shutdownNotificationQueue(): Promise<void> {
+  logger.info('Closing BullMQ notification worker and queue');
+  await notificationWorker.close();
+  await notificationQueue.close();
+  logger.info('BullMQ notification worker and queue closed');
 }

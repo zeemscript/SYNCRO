@@ -11,6 +11,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
+    // Issue #1265: backend/src is 100% TypeScript. Keep it that way — no new .js.
+    "allowJs": false,
     "moduleResolution": "node",
     "declaration": true,
     "declarationMap": true,
@@ -21,7 +23,7 @@
       "jest"
     ]
   },
-  "include": [ "src/**/*", "services/subscription-classifier.js", "tests/**/*.ts"],
+  "include": [ "src/**/*", "tests/**/*.ts"],
   "exclude": [
     "node_modules",
     "dist",

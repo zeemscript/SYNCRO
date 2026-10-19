@@ -7,13 +7,15 @@
  *     the latest ledger and back-fills them in bounded batches.
  *  3. Persists every on-chain event to `blockchain_logs` so the table is
  *     never missing a transaction.
- *  4. Uses exponential back-off with jitter on transient RPC failures.
+ *  4. Normalizes contract topics into a canonical dotted path so downstream
+ *     consumers can rely on stable event names across contracts.
+ *  5. Uses exponential back-off with jitter on transient RPC failures.
  */
 
 import logger from '../config/logger';
 import { supabase } from '../config/database';
-import { RpcClient } from '../../../shared/src/rpc-client';
-import {
+import { env } from '../config/env';
+import { RpcClient } from '@syncro/shared/rpc-client';import {
   getBlockchainFlags,
   resolveStellarNetwork,
 } from '../../../shared/blockchain-flags';
@@ -25,7 +27,7 @@ const _network = resolveStellarNetwork();
 
 // Resolve RPC URL — never silently fall back to testnet in production.
 function resolveRpcUrl(): string {
-  const configured = process.env.SOROBAN_RPC_URL;
+  const configured = env.SOROBAN_RPC_URL;
   if (!configured && _flags.isProduction) {
     throw new Error(
       '[indexer] SOROBAN_RPC_URL must be explicitly set in production. ' +
@@ -40,12 +42,12 @@ function resolveRpcUrl(): string {
 }
 
 const RPC_URL = resolveRpcUrl();
-const CONTRACT_ID = process.env.SOROBAN_CONTRACT_ADDRESS ?? '';
+const CONTRACT_ID = env.SOROBAN_CONTRACT_ADDRESS ?? '';
 const POLL_INTERVAL_MS = parseInt(
-  process.env.INDEXER_POLL_INTERVAL_MS ?? '6000',
+  env.INDEXER_POLL_INTERVAL_MS,
   10,
 );
-const BATCH_SIZE = parseInt(process.env.INDEXER_BATCH_SIZE ?? '200', 10);
+const BATCH_SIZE = parseInt(env.INDEXER_BATCH_SIZE, 10);
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 1000;
 
@@ -71,6 +73,72 @@ interface RawEvent {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function normalizeTopicPath(topics: string[]): string | null {
+  const cleaned = topics
+    .map((topic) => topic.trim().toLowerCase())
+    .filter((topic) => topic.length > 0);
+
+  return cleaned.length > 0 ? cleaned.join('.') : null;
+}
+
+function normalizeEventType(event: RawEvent): string {
+  return normalizeTopicPath(event.topic) ?? event.type;
+}
+
+function extractSchemaVersion(value: unknown): number {
+  const schemaVersion = (value as { schema_version?: unknown } | null)?.schema_version;
+  return typeof schemaVersion === 'number' ? schemaVersion : 1;
+}
+
+/** Current event schema version emitted by v3 contracts. */
+export const EVENT_SCHEMA_VERSION = 1;
+
+/** On-chain channel lifecycle actions indexed into the database. */
+export const CHANNEL_LIFECYCLE_ACTIONS = [
+  'opened',
+  'toppedup',
+  'submitted',
+  'closing',
+  'disputed',
+  'closed',
+  'wt_reg',
+  'wt_dereg',
+  'wt_sub',
+] as const;
+
+/** True when a normalized topic path is a channel lifecycle event. */
+export function isChannelLifecycleEvent(topicPath: string | null): boolean {
+  if (!topicPath) return false;
+  const [family, action] = topicPath.split('.');
+  return family === 'channel' &&
+    (CHANNEL_LIFECYCLE_ACTIONS as readonly string[]).includes(action);
+}
+
+/**
+ * Contract IDs the indexer subscribes to: the primary channel contract plus
+ * any extra v3 contracts (virtual-card, agent-registry) from
+ * INDEXER_CONTRACT_IDS. Resume-safe: callers page from the stored cursor.
+ */
+export function getIndexedContractIds(): string[] {
+  const extra = (env.INDEXER_CONTRACT_IDS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...new Set([CONTRACT_ID, ...extra].filter(Boolean))];
+}
+
+/**
+ * Branch on the event schema version so payloads can evolve safely.
+ * v1 returns the raw value unchanged; unknown future versions are passed
+ * through with a warning so no event is silently dropped.
+ */
+export function decodeEventByVersion(value: unknown, version?: number): unknown {
+  const v = version ?? extractSchemaVersion(value);
+  if (v === EVENT_SCHEMA_VERSION) return value;
+  logger.warn('Indexer: unknown event schema version', { version: v });
+  return value;
+}
 
 async function rpcPost<T>(method: string, params: unknown): Promise<T> {
   try {
@@ -101,10 +169,11 @@ async function fetchEvents(
   startLedger: number,
   endLedger: number,
 ): Promise<RawEvent[]> {
+  const contractIds = getIndexedContractIds();
   const result = await rpcPost<{ events: RawEvent[] }>('getEvents', {
     startLedger,
     endLedger,
-    filters: CONTRACT_ID ? [{ contractIds: [CONTRACT_ID] }] : [],
+    filters: contractIds.length > 0 ? [{ contractIds }] : [],
   });
   return result.events ?? [];
 }
@@ -129,7 +198,7 @@ async function persistEvents(events: RawEvent[]): Promise<void> {
 
   const rows = events.map((e) => ({
     user_id: 'system',
-    event_type: e.type,
+    event_type: normalizeEventType(e),
     event_data: {
       id: e.id,
       ledger: e.ledger,
@@ -137,6 +206,9 @@ async function persistEvents(events: RawEvent[]): Promise<void> {
       contractId: e.contractId,
       txHash: e.txHash,
       topic: e.topic,
+      topicPath: normalizeTopicPath(e.topic),
+      eventType: e.type,
+      schemaVersion: extractSchemaVersion(e.value),
       value: e.value,
     },
     transaction_hash: e.txHash,
@@ -180,7 +252,15 @@ async function indexRange(from: number, to: number): Promise<void> {
 async function tick(): Promise<void> {
   const [cursor, latest] = await Promise.all([getCursor(), getLatestLedger()]);
 
-  if (latest <= cursor) return; // nothing new
+  // Handle reorgs: a ledger that moved backwards rewinds via reorg-handler,
+  // then the stored cursor is re-read so indexing resumes without gaps.
+  if (latest <= cursor) {
+    if (latest < cursor) {
+      const { reorgHandler } = await import('../services/reorg-handler');
+      await reorgHandler.handleReorg(latest, cursor);
+    }
+    return; // nothing new
+  }
 
   const missed = latest - cursor;
   if (missed > BATCH_SIZE) {

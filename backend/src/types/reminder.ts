@@ -6,6 +6,7 @@ export interface ReminderSchedule {
   reminder_type: 'renewal' | 'trial_expiry' | 'cancellation';
   days_before: number;
   status: 'pending' | 'sent' | 'failed' | 'cancelled';
+  jitter_offset_hours?: number; // ±N hours, stored for audit
   created_at: string;
   updated_at: string;
 }
@@ -56,6 +57,7 @@ export interface Subscription {
   credit_card_required: boolean;
   created_at: string;
   updated_at: string;
+  currency?: string;
 }
 
 export interface UserProfile {
@@ -105,6 +107,7 @@ export interface UserPreferences {
   user_id: string;
   notification_channels: ('email' | 'push' | 'telegram' | 'slack')[];
   reminder_timing: number[]; // days before
+  reminder_jitter_level: 'off' | 'low' | 'medium' | 'high'; // low=±2h, medium=±6h, high=±12h
   email_opt_ins: {
     marketing: boolean;
     reminders: boolean;
@@ -126,8 +129,12 @@ export interface UserPreferences {
   currency: string;
   timezone: string;
   locale: string;
-  calendar_sync_enabled: boolean;
-  calendar_export_reminders: boolean;
+  /** id of the preferred gift-card purchasing provider (see client/lib/gift-card-providers/). */
+  preferred_gift_card_provider: string;
+  privacy_mode_enabled: boolean;
+  encryption_key?: string;
+  /** Subscription IDs in personal priority order (highest first). */
+  subscription_priority_order: string[];
   /** ISO-8601 UTC string. */
   updated_at: string;
 }
